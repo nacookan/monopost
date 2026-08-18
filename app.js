@@ -16,6 +16,8 @@
     editingEntryId: null,
     syncing: 0,
     saveTail: Promise.resolve(),
+    saveRunning: false,
+    pendingSave: null,
     local: false,
     revisions: {},
     conflictCopies: {},
@@ -805,36 +807,68 @@
       } else throw error;
     }
   }
-  // 保存時点のスナップショットをキューへ積む。書き込み順を保ち、古い内容で戻らないようにする。
-  function queueSave({ memo = null, index = false } = {}) {
-    // 呼び出し後にstateが変わっても、保存対象はこの時点の内容に固定する。
-    const memoSnapshot = memo && clone(memo),
-      indexSnapshot = index && clone(state.index);
+  // 最新の保存要求だけを保持し、入力途中の古いスナップショットを捨てる。
+  function rememberPendingSave({ memo = null, index = false } = {}) {
+    const pending = state.pendingSave || {};
 
-    // 直前の保存が失敗していても、次の保存は続行できるようにする。
-    state.saveTail = state.saveTail
-      .catch(() => {})
-      .then(async () => {
-        const saved = memoSnapshot
-          ? await saveMemoSnapshot(memoSnapshot)
-          : null;
-        if (indexSnapshot && saved?.copied)
-          await mergeMemoIntoLatestIndex(saved.memo);
-        else if (indexSnapshot)
-          await saveIndexSnapshot(indexSnapshot, saved?.memo || null);
-        if (saved) showConflictCopy(saved);
-      })
-      .catch((error) => {
-        // UIはすでに更新済みなので、保存失敗だけを通知する。
-        console.error(error);
-        notify(t(isConflictError(error) ? "conflictError" : "syncError"));
-      });
+    // メモ本体と一覧は、それぞれ最後に要求された内容で上書きする。
+    if (memo) pending.memo = clone(memo);
+    if (index) pending.index = clone(state.index);
+    state.pendingSave = pending;
+  }
+
+  // 1件分の保存スナップショットをDropboxへ反映する。
+  async function persistPendingSave(pending) {
+    const saved = pending.memo ? await saveMemoSnapshot(pending.memo) : null;
+
+    // 競合コピー化した場合、古い一覧ではなく最新一覧へコピーだけをマージする。
+    if (pending.index && saved?.copied)
+      await mergeMemoIntoLatestIndex(saved.memo);
+    else if (pending.index)
+      await saveIndexSnapshot(pending.index, saved?.memo || null);
+
+    if (saved) showConflictCopy(saved);
+  }
+
+  // 保存中に増えた変更を、常に最新1件へ畳み込みながら順番に保存する。
+  async function drainSaveQueue() {
+    try {
+      while (state.pendingSave) {
+        const pending = state.pendingSave;
+        state.pendingSave = null;
+
+        try {
+          await persistPendingSave(pending);
+        } catch (error) {
+          // UIはすでに更新済みなので、保存失敗だけを通知する。
+          console.error(error);
+          notify(t(isConflictError(error) ? "conflictError" : "syncError"));
+        }
+      }
+    } finally {
+      state.saveRunning = false;
+      if (state.pendingSave) queueSave();
+    }
+  }
+
+  // 保存要求を最新状態へまとめ、まだ保存処理がなければ開始する。
+  function queueSave({ memo = null, index = false } = {}) {
+    rememberPendingSave({ memo, index });
+
+    // 既存の保存・削除処理の後ろに、まとめた保存処理を1本だけつなぐ。
+    if (!state.saveRunning) {
+      state.saveRunning = true;
+      state.saveTail = state.saveTail.catch(() => {}).then(drainSaveQueue);
+    }
     return state.saveTail;
   }
   // メモJSONの削除と一覧更新を、他の保存処理と直列に実行する。
   function queueMemoDeletion(memoId) {
     // 削除後の一覧を固定して、後から追加された内容で復活しないようにする。
     const indexSnapshot = clone(state.index);
+
+    // 削除対象メモの未保存スナップショットは、削除後に復活しないよう捨てる。
+    if (state.pendingSave?.memo?.id === memoId) state.pendingSave = null;
 
     // 先行している保存のあとに、メモ本体の削除と一覧更新を続けて行う。
     state.saveTail = state.saveTail
@@ -888,10 +922,26 @@
     queueSave({ memo: state.memo, index: true });
   }
 
+  // 待機中のテンプレート保存タイマーを止める。
+  function clearTemplateSaveTimer() {
+    clearTimeout(state.templateTimer);
+    state.templateTimer = null;
+  }
+
   // テンプレート入力中は少し待ち、連続入力ごとの保存を避ける。
   function scheduleTemplateSave() {
-    clearTimeout(state.templateTimer);
-    state.templateTimer = setTimeout(saveMemo, 450);
+    clearTemplateSaveTimer();
+    state.templateTimer = setTimeout(() => {
+      state.templateTimer = null;
+      saveMemo();
+    }, 900);
+  }
+
+  // フォーカスが外れた時点で、待機中のテンプレート保存だけを即実行する。
+  function flushTemplateSave() {
+    if (!state.templateTimer) return;
+    clearTemplateSaveTimer();
+    saveMemo();
   }
 
   // 指定されたメモJSONを読み、編集中のメモとしてstateへセットする。
@@ -1062,6 +1112,7 @@
     state.index.memos = state.index.memos.filter((memo) => memo.id !== memoId);
     state.memo = null;
     state.editingEntryId = null;
+    clearTemplateSaveTimer();
     queueMemoDeletion(memoId);
     closeModal();
     location.hash = "#/";
@@ -1127,6 +1178,7 @@
     state.index = { version: 1, memos: [] };
     state.revisions = {};
     state.conflictCopies = {};
+    clearTemplateSaveTimer();
     history.replaceState({}, "", location.pathname);
     renderWelcome();
   }
@@ -1155,8 +1207,7 @@
   // 入力欄からフォーカスが外れたら、待機中の自動保存をすぐ実行する。
   document.addEventListener("change", (event) => {
     if (event.target.closest("[data-template-text],[data-template-name]")) {
-      clearTimeout(state.templateTimer);
-      saveMemo();
+      flushTemplateSave();
     }
   });
   // 画面を再描画しても個別リスナーを付け直さずに済むよう、操作はイベント委譲で扱う。
