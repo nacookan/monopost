@@ -265,6 +265,19 @@
     });
   }
 
+  // 投稿後は再描画で作り直された入力欄へフォーカスを戻す。
+  function focusEntryInput(input) {
+    requestAnimationFrame(() => {
+      try {
+        input.focus({ preventScroll: true });
+      } catch {
+        input.focus();
+      }
+      scrollMemoToBottom();
+      setTimeout(scrollMemoToBottom, 250);
+    });
+  }
+
   // テンプレート名が空の既存データでは、本文の先頭行を表示名にする。
   const templateLabel = (template) =>
     String(template.name || "").trim() ||
@@ -888,7 +901,7 @@
     renderIcons(app);
   }
   // メモ本体は投稿を先にUIへ反映し、Dropbox保存はバックグラウンドで行う。
-  function renderMemo() {
+  function renderMemo({ focusInput = false } = {}) {
     // よく使うテンプレート名を入力欄の近くへ最大4件だけ並べる。
     const memo = state.memo,
       templateButtons = memo.templates
@@ -920,6 +933,7 @@
 
     // 初期表示や新規投稿後は、常に新しい投稿が見える末尾までスクロールする。
     scrollMemoToBottom();
+    if (focusInput) focusEntryInput(input);
   }
   // テンプレートは名前と本文を同じ画面で直接編集し、自動保存する。
   function renderTemplates() {
@@ -1044,7 +1058,7 @@
 
     // UIは直ちに再描画し、保存はキュー経由で裏で進める。
     saveMemo();
-    renderMemo();
+    renderMemo({ focusInput: true });
   }
 
   // 予期しないエラーを画面と開発者コンソールへ表示する。
