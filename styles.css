@@ -526,6 +526,12 @@ button {
   margin: 0 0 16px;
   font-size: 14px;
 }
+.template-admin .empty {
+  margin: 0;
+}
+.template-add-button {
+  margin-top: 8px;
+}
 .template-item {
   margin: 9px 0;
   padding: 12px;
