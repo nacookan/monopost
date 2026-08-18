@@ -1,10 +1,19 @@
 # Monopost
 
+下記のURLで今すぐ利用できます。  
+You can use Monopost right now at the link below:  
+
+[https://nacookan.github.io/monopost/](https://nacookan.github.io/monopost/)
+
+## 概要/Summary
+
+![Monopost screenshot](docs/screen1.png)
+
 Monopostは、自分専用のチャットに投稿する感覚でメモを残せるアプリです。Dropboxに接続して使います。
 
-アプリには、ユーザーデータを保存するためのサーバーはありません。あなたのデータは、あなた自身のDropboxアカウントだけに保存されます。
-
 Monopost is a notes app that feels like posting to your own private chat. Connect it to Dropbox to use it.
+
+アプリには、ユーザーデータを保存するためのサーバーはありません。あなたのデータは、あなた自身のDropboxアカウントだけに保存されます。
 
 The app does not have a server for storing user data. Your data is saved only in your own Dropbox account.
 
