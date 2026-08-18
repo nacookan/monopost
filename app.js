@@ -1026,6 +1026,9 @@
 
   // モーダルまたは画面下部シートをDOMへ追加して表示する。
   function showModal(content, className = "modal-backdrop") {
+    // 確認ダイアログを重ねて開く場合も、古いモーダルを残さない。
+    closeModal();
+
     const modal = document.createElement("div");
     modal.className = className;
     modal.id = "modal";
@@ -1035,7 +1038,9 @@
   }
 
   // 開いているモーダルがあれば閉じる。
-  const closeModal = () => document.querySelector("#modal")?.remove();
+  const closeModal = () => {
+    document.querySelectorAll("#modal").forEach((modal) => modal.remove());
+  };
 
   // メモ右上のメニューを開く。
   function noteMenu() {
