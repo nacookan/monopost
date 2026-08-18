@@ -66,6 +66,7 @@ button {
   height: 100dvh;
   min-height: 100vh;
   min-height: 100dvh;
+  padding-bottom: 0;
   overflow: hidden;
 }
 .topbar {
@@ -351,7 +352,8 @@ button {
   position: sticky;
   bottom: 0;
   flex: 0 0 auto;
-  padding: 10px 0 calc(12px + env(safe-area-inset-bottom));
+  margin: 0 -18px;
+  padding: 10px 18px calc(12px + env(safe-area-inset-bottom));
   background: linear-gradient(transparent, #071c17 20%);
 }
 .template-strip {
@@ -423,6 +425,7 @@ button {
   display: flex;
   align-items: flex-end;
   justify-content: center;
+  padding-bottom: calc(12px + env(safe-area-inset-bottom));
 }
 .modal {
   display: grid;
@@ -438,7 +441,7 @@ button {
 }
 .sheet {
   border-radius: 23px;
-  padding: 10px 14px calc(18px + env(safe-area-inset-bottom));
+  padding: 10px 14px 18px;
 }
 .dialog {
   max-width: 460px;
@@ -555,6 +558,7 @@ button {
 }
 .template-add-button {
   margin-top: 8px;
+  margin-bottom: 14px;
 }
 .template-item {
   margin: 9px 0;
