@@ -57,7 +57,8 @@
       save: "Save",
       changeIcon: "Change icon",
       deleteEntry: "Delete this post?",
-      deleteEntryText: "This will be reflected in Dropbox in the background.",
+      deleteEntryText:
+        "Are you sure you want to delete this post? This action cannot be undone.",
       deleteMemo: "Delete this Note?",
       deleteMemoText:
         "Are you sure you want to delete this Note? This action cannot be undone.",
@@ -114,7 +115,7 @@
       save: "保存",
       changeIcon: "アイコンを変更",
       deleteEntry: "この投稿を削除しますか？",
-      deleteEntryText: "変更はバックグラウンドで Dropbox に反映されます。",
+      deleteEntryText: "投稿を削除してよろしいですか？この操作は元に戻せません。",
       deleteMemo: "このメモを削除しますか？",
       deleteMemoText:
         "メモを削除してよろしいですか？この操作は元に戻せません。",
