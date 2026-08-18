@@ -1,0 +1,11 @@
+# ローカル開発用のDropbox App key
+config.local.js
+
+# GitHub Pages の配布用成果物
+_site/
+
+# OS・エディタ・ログの一時ファイル
+.DS_Store
+*.log
+*.tmp
+*.bak

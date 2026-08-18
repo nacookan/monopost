@@ -1,0 +1,14 @@
+{
+  "name": "Monopost",
+  "short_name": "Monopost",
+  "description": "A private chat-style notes app.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#071e19",
+  "theme_color": "#071e19",
+  "icons": [
+    { "src": "assets/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "assets/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" },
+    { "src": "assets/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
