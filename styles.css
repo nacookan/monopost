@@ -46,6 +46,13 @@ button {
   background: linear-gradient(180deg, #0a241ed9, #061814cf);
   backdrop-filter: blur(12px);
 }
+.memo-screen {
+  height: 100vh;
+  height: 100dvh;
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow: hidden;
+}
 .topbar {
   height: 74px;
   display: flex;
@@ -264,6 +271,7 @@ button {
   flex: 1;
   flex-direction: column;
   gap: 10px;
+  min-height: 0;
   overflow: auto;
   padding: 12px 0 18px;
 }
@@ -324,6 +332,7 @@ button {
 .composer-wrap {
   position: sticky;
   bottom: 0;
+  flex: 0 0 auto;
   padding: 10px 0 calc(12px + env(safe-area-inset-bottom));
   background: linear-gradient(transparent, #071c17 20%);
 }

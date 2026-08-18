@@ -250,6 +250,21 @@
   // data-lucide属性を実際のSVGアイコンへ置き換える。
   const renderIcons = (root = document) => window.lucide?.createIcons({ root });
 
+  // メモ画面の描画直後に、レイアウト確定を待って投稿一覧の末尾へ移動する。
+  function scrollMemoToBottom() {
+    const scroll = () => {
+      const chat = document.querySelector(".chat");
+      if (chat) chat.scrollTop = chat.scrollHeight;
+    };
+
+    // Lucide置換やtextarea計算の後でも効くよう、複数タイミングで下端へ寄せる。
+    requestAnimationFrame(() => {
+      scroll();
+      requestAnimationFrame(scroll);
+      setTimeout(scroll, 80);
+    });
+  }
+
   // テンプレート名が空の既存データでは、本文の先頭行を表示名にする。
   const templateLabel = (template) =>
     String(template.name || "").trim() ||
@@ -885,7 +900,7 @@
         .join("");
 
     // メモの投稿一覧、テンプレート操作、入力欄をまとめて描画する。
-    app.innerHTML = `<section class="shell">${header({ back: true, title: memo.title || t("newMemoTitle"), right: `<button class="icon-button" data-action="note-menu" aria-label="Note menu">${icon("menu")}</button>` })}<div class="chat">${memo.entries.length ? memo.entries.map((entry) => `<div class="entry-row"><span class="entry-memo-icon">${icon(memo.icon)}</span><div><button class="bubble" data-entry="${escapeAttr(entry.id)}">${escapeHtml(entry.text || "")}</button><time class="entry-time">${formatDate(entry.createdAt)}</time></div></div>`).join("") : `<div class="new-note">${escapeHtml(t("newPost")).replace(/\n/g, "<br>")}</div>`}</div><div class="composer-wrap"><div class="template-strip"><button class="template-chip" data-action="pick-template">${icon("message-square-text", "button-icon")} ${t("templates")}</button>${templateButtons}</div><div class="composer"><textarea id="entry-input" rows="1" placeholder="${t("placeholder")}" aria-label="${t("send")}"></textarea><button class="send" data-action="submit-entry" aria-label="${t("send")}">${icon("send")}</button></div></div></section>`;
+    app.innerHTML = `<section class="shell memo-screen">${header({ back: true, title: memo.title || t("newMemoTitle"), right: `<button class="icon-button" data-action="note-menu" aria-label="Note menu">${icon("menu")}</button>` })}<div class="chat">${memo.entries.length ? memo.entries.map((entry) => `<div class="entry-row"><span class="entry-memo-icon">${icon(memo.icon)}</span><div><button class="bubble" data-entry="${escapeAttr(entry.id)}">${escapeHtml(entry.text || "")}</button><time class="entry-time">${formatDate(entry.createdAt)}</time></div></div>`).join("") : `<div class="new-note">${escapeHtml(t("newPost")).replace(/\n/g, "<br>")}</div>`}</div><div class="composer-wrap"><div class="template-strip"><button class="template-chip" data-action="pick-template">${icon("message-square-text", "button-icon")} ${t("templates")}</button>${templateButtons}</div><div class="composer"><textarea id="entry-input" rows="1" placeholder="${t("placeholder")}" aria-label="${t("send")}"></textarea><button class="send" data-action="submit-entry" aria-label="${t("send")}">${icon("send")}</button></div></div></section>`;
 
     // 描画したLucideアイコンをSVGへ変換する。
     renderIcons(app);
@@ -903,11 +918,8 @@
       }
     });
 
-    // 再描画後は常に新しい投稿が見える末尾までスクロールする。
-    requestAnimationFrame(() => {
-      const chat = document.querySelector(".chat");
-      if (chat) chat.scrollTop = chat.scrollHeight;
-    });
+    // 初期表示や新規投稿後は、常に新しい投稿が見える末尾までスクロールする。
+    scrollMemoToBottom();
   }
   // テンプレートは名前と本文を同じ画面で直接編集し、自動保存する。
   function renderTemplates() {
