@@ -1212,6 +1212,16 @@
   });
   // 画面を再描画しても個別リスナーを付け直さずに済むよう、操作はイベント委譲で扱う。
   document.addEventListener("click", async (event) => {
+    // テンプレート管理のボタン列の余白は、同じカードの本文入力へフォーカスする。
+    const templateActions = event.target.closest(".template-item-actions");
+    if (templateActions && !event.target.closest("button")) {
+      const textField = templateActions
+        .closest(".template-item")
+        ?.querySelector("[data-template-text]");
+      textField?.focus();
+      return;
+    }
+
     // ボタン以外のクリックは扱わない。
     const target = event.target.closest("button");
     if (!target) return;

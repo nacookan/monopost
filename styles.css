@@ -563,6 +563,7 @@ button {
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
+  cursor: text;
 }
 .small-button {
   padding: 7px 9px;
