@@ -16,13 +16,26 @@
 * {
   box-sizing: border-box;
 }
+html,
+body,
+#app {
+  min-height: 100%;
+}
+html {
+  background: var(--bg-deep);
+}
 body {
   min-height: 100vh;
+  min-height: 100dvh;
   margin: 0;
   background:
     radial-gradient(900px 580px at 50% -10%, #1e5e49 0%, transparent 65%),
     radial-gradient(500px 500px at 110% 70%, #174737 0%, transparent 65%),
     linear-gradient(145deg, var(--bg), var(--bg-deep));
+}
+#app {
+  min-height: 100vh;
+  min-height: 100dvh;
 }
 button,
 input,
@@ -37,8 +50,10 @@ button {
 .shell {
   position: relative;
   z-index: 1;
+  width: min(720px, 100%);
   max-width: 720px;
   min-height: 100vh;
+  min-height: 100dvh;
   margin: auto;
   padding: env(safe-area-inset-top) 18px env(safe-area-inset-bottom);
   display: flex;
@@ -266,6 +281,9 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.memo-title + .spacer {
+  flex: 0;
+}
 .chat {
   display: flex;
   flex: 1;
@@ -464,7 +482,7 @@ button {
 }
 .template-pick {
   width: 100%;
-  margin: 7px 0;
+  margin: 0;
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -472,6 +490,12 @@ button {
   color: var(--ink);
   text-align: left;
   white-space: pre-wrap;
+}
+.template-pick + .template-pick {
+  margin-top: 4px;
+}
+.template-pick + .menu-button {
+  margin-top: 10px;
 }
 .icon-grid {
   display: grid;
