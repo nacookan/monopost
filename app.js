@@ -278,6 +278,28 @@
     });
   }
 
+  // textareaを内容量に合わせて広げ、長すぎる場合だけ上限で止める。
+  function fitTextarea(textarea, maxHeight) {
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
+  }
+
+  // テンプレート本文を、改行を補ったり削ったりせずカーソル位置へ挿入する。
+  function insertAtCursor(input, text) {
+    const start = input.selectionStart ?? input.value.length,
+      end = input.selectionEnd ?? input.value.length,
+      inserted = String(text || "");
+
+    if (input.setRangeText) {
+      input.setRangeText(inserted, start, end, "end");
+    } else {
+      input.value = `${input.value.slice(0, start)}${inserted}${input.value.slice(end)}`;
+      input.selectionStart = input.selectionEnd = start + inserted.length;
+    }
+
+    input.dispatchEvent(new Event("input"));
+  }
+
   // テンプレート名が空の既存データでは、本文の先頭行を表示名にする。
   const templateLabel = (template) =>
     String(template.name || "").trim() ||
@@ -921,8 +943,7 @@
     // テキストエリアの高さを内容に合わせ、⌘/Ctrl+Enterで投稿できるようにする。
     const input = document.querySelector("#entry-input");
     input.addEventListener("input", () => {
-      input.style.height = "auto";
-      input.style.height = `${Math.min(input.scrollHeight, 150)}px`;
+      fitTextarea(input, 150);
     });
     input.addEventListener("keydown", (event) => {
       if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -939,7 +960,17 @@
   function renderTemplates() {
     // テンプレートがない場合も、追加ボタンは常に表示する。
     const templates = state.memo.templates;
-    app.innerHTML = `<section class="shell template-admin">${header({ back: true, title: "" })}<h1>${t("templates")}</h1><p>${t("templatesText")}</p><button class="outline" data-action="new-template">${icon("plus", "button-icon")} ${t("addTemplate")}</button><div id="template-list">${templates.length ? templates.map((template, index) => `<article class="template-item"><input class="template-name" data-template-name="${escapeAttr(template.id)}" value="${escapeHtml(template.name || "")}" placeholder="${t("templateName")}" aria-label="${t("templateName")}"><textarea data-template-text="${escapeAttr(template.id)}" aria-label="${t("templates")}">${escapeHtml(template.text || "")}</textarea><div class="template-item-actions"><button class="small-button" data-move="up" data-template-id="${escapeAttr(template.id)}" ${index === 0 ? "disabled" : ""}>${icon("arrow-up-from-line")}</button><button class="small-button" data-move="down" data-template-id="${escapeAttr(template.id)}" ${index === templates.length - 1 ? "disabled" : ""}>${icon("arrow-down-from-line")}</button><button class="small-button danger" data-action="delete-template" data-template-id="${escapeAttr(template.id)}">${icon("square-x", "button-icon")} ${t("delete")}</button></div></article>`).join("") : `<div class="empty"><h2>${t("noTemplates")}</h2></div>`}</div></section>`;
+    app.innerHTML = `<section class="shell template-admin">${header({ back: true, title: "" })}<h1>${t("templates")}</h1><p>${t("templatesText")}</p><button class="outline" data-action="new-template">${icon("plus", "button-icon")} ${t("addTemplate")}</button><div id="template-list">${templates.length ? templates.map((template, index) => `<article class="template-item"><input class="template-name" data-template-name="${escapeAttr(template.id)}" value="${escapeHtml(template.name || "")}" placeholder="${t("templateName")}" aria-label="${t("templateName")}"><textarea data-template-text="${escapeAttr(template.id)}" aria-label="${t("templates")}"></textarea><div class="template-item-actions"><button class="small-button" data-move="up" data-template-id="${escapeAttr(template.id)}" ${index === 0 ? "disabled" : ""}>${icon("arrow-up-from-line")}</button><button class="small-button" data-move="down" data-template-id="${escapeAttr(template.id)}" ${index === templates.length - 1 ? "disabled" : ""}>${icon("arrow-down-from-line")}</button><button class="small-button danger" data-action="delete-template" data-template-id="${escapeAttr(template.id)}">${icon("square-x", "button-icon")} ${t("delete")}</button></div></article>`).join("") : `<div class="empty"><h2>${t("noTemplates")}</h2></div>`}</div></section>`;
+
+    // textareaのHTML初期値では先頭改行が落ちるため、valueとして正確に復元する。
+    document.querySelectorAll("[data-template-text]").forEach((field) => {
+      const template = templates.find(
+        (item) => item.id === field.dataset.templateText,
+      );
+      if (template) field.value = String(template.text || "");
+      fitTextarea(field, 260);
+    });
+
     renderIcons(app);
   }
 
@@ -1040,8 +1071,8 @@
   function submitEntry() {
     // 空白だけの投稿は作らない。
     const input = document.querySelector("#entry-input"),
-      text = input.value.trim();
-    if (!text) return;
+      text = input.value;
+    if (!text.trim()) return;
 
     // 編集対象の有無で、更新と新規追加を切り替える。
     const existing =
@@ -1113,8 +1144,10 @@
         item.id === (field.dataset.templateText || field.dataset.templateName),
     );
     if (template) {
-      if (field.dataset.templateText) template.text = field.value;
-      else template.name = field.value;
+      if (field.dataset.templateText) {
+        template.text = field.value;
+        fitTextarea(field, 260);
+      } else template.name = field.value;
       scheduleTemplateSave();
     }
   });
@@ -1211,11 +1244,8 @@
           ),
           input = document.querySelector("#entry-input");
         if (template && input) {
-          input.value = input.value
-            ? `${input.value}\n${template.text}`
-            : template.text;
-          input.focus();
-          input.dispatchEvent(new Event("input"));
+          insertAtCursor(input, template.text);
+          focusEntryInput(input);
         }
         closeModal();
         return;
