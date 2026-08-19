@@ -29,7 +29,7 @@ jobs:
         run: |
           test -n "$DROPBOX_APP_KEY"
           mkdir _site
-          cp index.html app.js styles.css manifest.webmanifest sw.js favicon.ico _site/
+          cp index.html privacy.html app.js styles.css manifest.webmanifest sw.js favicon.ico _site/
           cp -R assets _site/assets
           printf 'window.MONOPOST_CONFIG = { dropboxAppKey: "%s" };\n' "$DROPBOX_APP_KEY" > _site/config.local.js
 
