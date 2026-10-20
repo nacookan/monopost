@@ -18,11 +18,20 @@
     saveTail: Promise.resolve(),
     saveRunning: false,
     pendingSave: null,
+    failedSave: null,
     local: false,
+    ready: false,
+    view: "",
+    refreshing: null,
     revisions: {},
-    conflictCopies: {},
+    // 最後にDropboxと一致していた内容。競合時の3方向マージで共通の元として使う。
+    bases: {},
+    deletedMemoIds: new Set(),
     templateTimer: null,
   };
+  // 別端末の変更を確認する間隔と、競合時に読み直してマージする最大回数。
+  const REFRESH_INTERVAL = 15000;
+  const MERGE_RETRIES = 4;
   const copy = {
     en: {
       yourNotes: "Your Notes",
@@ -70,9 +79,12 @@
       templateSaved: "Saved as a template",
       deleted: "Deleted",
       syncError: "Couldn’t save. Check your connection.",
-      conflictError: "This Note changed elsewhere. Reload before saving again.",
-      conflictCopySaved: "Saved as a conflict copy.",
-      conflictCopySuffix: "conflict copy",
+      conflictError:
+        "Couldn’t merge changes from another device. Please try again.",
+      reload: "Reload",
+      updated: "Loaded the latest changes",
+      upToDate: "Already up to date",
+      memoDeleted: "This Note was deleted on another device.",
       loadError: "Couldn’t load",
       retry: "Retry",
       authError: "Couldn’t connect to Dropbox.",
@@ -128,9 +140,11 @@
       deleted: "削除しました",
       syncError: "保存できませんでした。接続を確認してください。",
       conflictError:
-        "別の端末で変更されています。再読み込みしてから保存してください。",
-      conflictCopySaved: "競合コピーとして保存しました。",
-      conflictCopySuffix: "競合コピー",
+        "別の端末の変更とまとめられませんでした。もう一度お試しください。",
+      reload: "再読み込み",
+      updated: "最新の内容を読み込みました",
+      upToDate: "最新の状態です",
+      memoDeleted: "このメモは別の端末で削除されました。",
       loadError: "読み込めませんでした",
       retry: "再試行",
       authError: "Dropbox の認証に失敗しました。",
@@ -228,6 +242,7 @@
     "arrow-up-from-line",
     "arrow-down-from-line",
     "square-x",
+    "refresh-cw",
   ];
   const ALLOWED_ICONS = new Set([...MEMO_ICON_CHOICES, ...UI_ICON_CHOICES]);
 
@@ -268,16 +283,20 @@
     });
   }
 
-  // 投稿後は再描画で作り直された入力欄へフォーカスを戻す。
+  // iPhoneなど、入力欄へのフォーカスでソフトウェアキーボードが出る端末かを判定する。
+  const usesTouchKeyboard = () =>
+    window.matchMedia("(hover: none) and (pointer: coarse)").matches;
+
+  // テンプレート挿入後などに入力欄へフォーカスを戻す。
+  // タッチ端末ではキーボードを出し直すと入力欄が隠れる位置になるため、自動では出さない。
   function focusEntryInput(input) {
+    if (document.activeElement === input || usesTouchKeyboard()) return;
     requestAnimationFrame(() => {
       try {
         input.focus({ preventScroll: true });
       } catch {
         input.focus();
       }
-      scrollMemoToBottom();
-      setTimeout(scrollMemoToBottom, 250);
     });
   }
 
@@ -343,6 +362,11 @@
   const isConflictError = (error) =>
     String(error?.message || error).includes("Dropbox 409");
 
+  // 別端末で削除済みなど、対象ファイルが存在しない409かを判定する。
+  const isNotFoundError = (error) =>
+    isConflictError(error) &&
+    String(error?.message || error).includes("not_found");
+
   // メモ本文ファイルのDropboxパスを一箇所で組み立てる。
   const memoPath = (memoId) => `/memos/${memoId}.json`;
 
@@ -360,8 +384,12 @@
     state.syncing = Math.max(0, state.syncing + delta);
 
     // 現在描画されているヘッダーがあれば表示を更新する。
+    // Dropbox接続中は再読み込みボタンのアイコンを回し、体験版ではスピナーを出す。
     const el = document.querySelector("#sync-indicator");
-    if (el)
+    if (!el) return;
+    if (el.dataset.action === "refresh")
+      el.classList.toggle("is-syncing", state.syncing > 0);
+    else
       el.innerHTML = state.syncing
         ? '<span class="spinner" aria-label="Saving"></span>'
         : "";
@@ -382,7 +410,12 @@
     const leading = back
       ? `<button class="icon-button" data-action="back" aria-label="Back">${icon("chevron-left")}</button>`
       : "";
-    return `<header class="topbar">${leading}<div class="${title === "Monopost" ? "brand" : "memo-title"}">${escapeHtml(title)}</div><div class="spacer"></div><div class="sync" id="sync-indicator">${state.syncing ? '<span class="spinner"></span>' : ""}</div>${right}${controls}</header>`;
+
+    // Dropbox接続中は通信中表示を兼ねた再読み込みボタン、体験版ではスピナーだけを置く。
+    const sync = isConnected()
+      ? `<button class="icon-button sync-button${state.syncing ? " is-syncing" : ""}" id="sync-indicator" data-action="refresh" aria-label="${t("reload")}" title="${t("reload")}">${icon("refresh-cw")}</button>`
+      : `<div class="sync" id="sync-indicator">${state.syncing ? '<span class="spinner"></span>' : ""}</div>`;
+    return `<header class="topbar">${leading}<div class="${title === "Monopost" ? "brand" : "memo-title"}">${escapeHtml(title)}</div><div class="spacer"></div>${sync}${right}${controls}</header>`;
   }
   // Dropbox未設定時の体験版データをlocalStorageから読む。
   function localData() {
@@ -551,11 +584,12 @@
     return saved.accessToken;
   }
   // Dropbox API呼び出しはここへ集約し、通信中はヘッダーにスピナーを出す。
-  async function dbx(endpoint, args, content) {
+  // 定期的な変更確認のような軽い呼び出しは、quietで通信中表示を出さない。
+  async function dbx(endpoint, args, content, { quiet = false } = {}) {
     // API呼び出しに必要な認証情報を確保する。
     const accessToken = await token();
     if (!accessToken) throw new Error(t("relink"));
-    setSyncing(1);
+    if (!quiet) setSyncing(1);
     try {
       // ダウンロード・アップロード・JSON APIで必要なヘッダーと本文を切り替える。
       const headers = { Authorization: `Bearer ${accessToken}` },
@@ -597,7 +631,7 @@
       return response.json();
     } finally {
       // 成否にかかわらず通信中表示を解除する。
-      setSyncing(-1);
+      if (!quiet) setSyncing(-1);
     }
   }
 
@@ -609,7 +643,35 @@
         : localData().memos[path.slice(7, -5)];
     const result = await dbx("files/download", { path });
     if (result.metadata?.rev) state.revisions[path] = result.metadata.rev;
+
+    // 画面側で書き換えられないよう、マージ用の元データは別オブジェクトとして持つ。
+    state.bases[path] = JSON.parse(result.content);
     return JSON.parse(result.content);
+  }
+
+  // 別端末で削除済みならnullを返し、次の保存を新規作成として扱う。
+  async function readFileIfExists(path) {
+    try {
+      return await readFile(path);
+    } catch (error) {
+      if (!isNotFoundError(error)) throw error;
+      delete state.revisions[path];
+      delete state.bases[path];
+      return null;
+    }
+  }
+
+  // 本文をダウンロードせず、Dropbox上の現在のrevだけを確認する。削除済みならnull。
+  async function remoteRevision(path) {
+    try {
+      const metadata = await dbx("files/get_metadata", { path }, undefined, {
+        quiet: true,
+      });
+      return metadata.rev || null;
+    } catch (error) {
+      if (isNotFoundError(error)) return null;
+      throw error;
+    }
   }
 
   // Dropboxまたは体験版ストレージへJSONファイルを書く。
@@ -636,6 +698,7 @@
         JSON.stringify(content, null, 2),
       );
     if (metadata?.rev) state.revisions[path] = metadata.rev;
+    state.bases[path] = clone(content);
   }
 
   // 一覧に保存する1メモ分の要約を作る。
@@ -668,119 +731,172 @@
     return normalized;
   }
 
-  // index.jsonだけが競合した場合は、最新一覧を読み直して対象メモだけをマージする。
-  async function mergeMemoIntoLatestIndex(memo, retries = 3) {
-    for (let attempt = 0; attempt < retries; attempt += 1) {
-      let latest;
-      try {
-        latest = await readFile("/index.json");
-      } catch (error) {
-        if (!String(error.message).includes("409")) throw error;
-        delete state.revisions["/index.json"];
-        latest = { version: 1, memos: [] };
-      }
+  // 一覧を更新日時の新しい順に並べる。
+  const sortByUpdated = (memos) =>
+    memos.sort((a, b) =>
+      String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")),
+    );
 
-      const merged = upsertSummary(latest, summaryForMemo(memo));
-      try {
-        await writeFile("/index.json", merged);
-        state.index = merged;
-        return;
-      } catch (error) {
-        if (!isConflictError(error) || attempt === retries - 1) throw error;
-      }
-    }
-  }
+  // 2つのJSON値が同じ内容かを比べる。
+  const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
-  // 競合コピーであることが後から見てわかるタイトルにする。
-  function conflictCopyTitle(title) {
-    const base = title || t("newMemoTitle"),
-      suffix =
-        language() === "ja"
-          ? `（${t("conflictCopySuffix")}）`
-          : ` (${t("conflictCopySuffix")})`;
-    return base.endsWith(suffix) ? base : `${base}${suffix}`;
-  }
+  // 共通の元(base)と比べて、手元(local)と別端末(remote)の変更をIDごとに1つへまとめる。
+  // 片側だけの変更はそのまま採用し、両側で変わった項目だけpickで選ぶ。
+  function mergeList(base, local, remote, { pick, deleteWins = false }) {
+    const toMap = (list) =>
+        new Map(
+          (Array.isArray(list) ? list : []).map((item) => [item.id, item]),
+        ),
+      before = toMap(base),
+      mine = toMap(local),
+      theirs = toMap(remote),
+      merged = new Map();
 
-  // 元メモの保存が競合したら、手元の内容を新しいメモJSONとして退避する。
-  async function saveConflictCopy(memo) {
-    const originalId = memo.id,
-      copied = clone(memo),
-      copiedAt = now();
-    copied.id = id();
-    copied.title = conflictCopyTitle(copied.title);
-    copied.createdAt = copiedAt;
-    copied.updatedAt = copiedAt;
-
-    // UUID衝突はほぼ起きないが、addが409になった場合だけIDを作り直す。
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      try {
-        await writeFile(memoPath(copied.id), copied);
-        state.conflictCopies[originalId] = copied.id;
-        return copied;
-      } catch (error) {
-        if (!isConflictError(error) || attempt === 2) throw error;
-        copied.id = id();
+    for (const itemId of new Set([...mine.keys(), ...theirs.keys()])) {
+      const original = before.get(itemId),
+        ours = mine.get(itemId),
+        other = theirs.get(itemId);
+      if (ours && other) {
+        if (sameJson(ours, other) || sameJson(other, original))
+          merged.set(itemId, ours);
+        else if (sameJson(ours, original)) merged.set(itemId, other);
+        else merged.set(itemId, pick(ours, other, original));
+      } else if (
+        !original ||
+        (!deleteWins && !sameJson(ours || other, original))
+      ) {
+        // 片側にしかない項目は、新規追加か、もう片側で削除される前に編集された場合だけ残す。
+        merged.set(itemId, ours || other);
       }
     }
+
+    // 並び順は並べ替えた側を優先し、もう片側にだけある項目を後ろへ足す。
+    const ids = (map) => [...map.keys()],
+      reordered = (map) =>
+        !sameJson(
+          ids(map).filter((itemId) => before.has(itemId)),
+          ids(before).filter((itemId) => map.has(itemId)),
+        ),
+      [first, second] =
+        reordered(mine) || !reordered(theirs) ? [mine, theirs] : [theirs, mine];
+    return [...new Set([...ids(first), ...ids(second)])]
+      .filter((itemId) => merged.has(itemId))
+      .map((itemId) => merged.get(itemId));
   }
 
-  // 保存キュー上のスナップショットを、通常保存または競合コピーとして保存する。
+  // 同じメモの手元版と別端末版を、重複なく1つにまとめる。投稿は作成日時順に並べる。
+  function mergeMemos(base, local, remote) {
+    const before = base || {},
+      changed = (ours, other, original, key) =>
+        sameJson(ours[key], original[key]) ? other[key] : ours[key],
+      editedAt = (entry) => String(entry.updatedAt || entry.createdAt || ""),
+      dates = (key) => [local[key], remote[key]].filter(Boolean).sort();
+
+    return clone({
+      ...remote,
+      ...local,
+      title: changed(local, remote, before, "title"),
+      icon: changed(local, remote, before, "icon"),
+      createdAt: dates("createdAt")[0],
+      updatedAt: dates("updatedAt").pop(),
+      // 同じ投稿が両方で編集されていたら、後から編集した方を残す。
+      entries: mergeList(before.entries, local.entries, remote.entries, {
+        pick: (ours, other) =>
+          editedAt(other) > editedAt(ours) ? other : ours,
+      }).sort((a, b) =>
+        String(a.createdAt || "").localeCompare(String(b.createdAt || "")),
+      ),
+      // テンプレートは名前と本文を別々にマージし、両方で変えた項目は手元を優先する。
+      templates: mergeList(
+        before.templates,
+        local.templates,
+        remote.templates,
+        {
+          pick: (ours, other, original = {}) => ({
+            ...other,
+            ...ours,
+            name: changed(ours, other, original, "name"),
+            text: changed(ours, other, original, "text"),
+          }),
+        },
+      ),
+    });
+  }
+
+  // メモ一覧をマージする。どちらかで削除されたメモは、一覧からも削除する。
+  function mergeIndex(base, local, remote) {
+    const memos = mergeList(base?.memos, local?.memos, remote?.memos, {
+      pick: (ours, other) =>
+        String(other.updatedAt || "") > String(ours.updatedAt || "")
+          ? other
+          : ours,
+      deleteWins: true,
+    }).filter((memo) => !state.deletedMemoIds.has(memo.id));
+    return clone({
+      version: local?.version || remote?.version || 1,
+      memos: sortByUpdated(memos),
+    });
+  }
+
+  // メモを保存する。別端末の変更と競合したら、最新版を読み直してマージしてから保存し直す。
   async function saveMemoSnapshot(memo) {
-    const originalId = memo.id,
-      conflictCopyId = state.conflictCopies[originalId],
-      target = clone(memo);
+    const path = memoPath(memo.id);
+    let base = state.bases[path],
+      content = memo;
 
-    // すでに競合コピー化した元メモの後続保存は、同じコピーへ流す。
-    if (conflictCopyId) {
-      target.id = conflictCopyId;
-      target.title = conflictCopyTitle(target.title);
-    }
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await writeFile(path, content);
+        return content;
+      } catch (error) {
+        if (!isConflictError(error) || attempt >= MERGE_RETRIES) throw error;
 
-    try {
-      await writeFile(memoPath(target.id), target);
-      return {
-        memo: target,
-        originalId,
-        copied: target.id !== originalId,
-      };
-    } catch (error) {
-      if (!isConflictError(error)) throw error;
-      return {
-        memo: await saveConflictCopy(memo),
-        originalId,
-        copied: true,
-      };
+        // 別端末で削除されていた場合は、手元の内容で作り直す。
+        const remote = await readFileIfExists(path);
+        if (remote) content = mergeMemos(base, content, remote);
+        base = remote;
+      }
     }
   }
 
-  // index.json保存が競合したら、最新一覧に対象メモだけを合流させる。
-  async function saveIndexSnapshot(indexSnapshot, savedMemo) {
-    try {
-      await writeFile("/index.json", indexSnapshot);
-    } catch (error) {
-      if (!isConflictError(error) || !savedMemo) throw error;
-      await mergeMemoIntoLatestIndex(savedMemo);
+  // 一覧を保存する。競合したら最新一覧とマージし、保存したメモが必ず載るようにする。
+  async function saveIndexSnapshot(savedMemos = []) {
+    const path = "/index.json",
+      attempted = clone(state.index);
+    let base = state.bases[path],
+      content = attempted;
+
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await writeFile(path, content);
+        break;
+      } catch (error) {
+        if (!isConflictError(error) || attempt >= MERGE_RETRIES) throw error;
+        const remote = (await readFileIfExists(path)) || {
+          version: 1,
+          memos: [],
+        };
+        content = mergeIndex(base, content, remote);
+        savedMemos
+          .filter((memo) => !state.deletedMemoIds.has(memo.id))
+          .forEach((memo) => upsertSummary(content, summaryForMemo(memo)));
+        base = remote;
+      }
     }
+
+    // マージした場合は、保存中に画面側で増えた変更も残したまま一覧へ反映する。
+    if (content === attempted) return false;
+    state.index = mergeIndex(attempted, state.index, content);
+    return true;
   }
 
-  // 競合コピー化したメモを現在開いている場合は、画面もコピー側へ移す。
-  function showConflictCopy(saved) {
-    if (!saved.copied || state.memo?.id !== saved.originalId) return;
-
-    // 画面上の最新状態を保ったまま、新しいメモIDへ切り替える。
-    const visibleMemo = clone(state.memo);
-    visibleMemo.id = saved.memo.id;
-    visibleMemo.title = conflictCopyTitle(visibleMemo.title);
-    visibleMemo.createdAt = saved.memo.createdAt;
-    visibleMemo.updatedAt = saved.memo.updatedAt;
-    state.memo = visibleMemo;
-    state.editingEntryId = null;
-
-    // 一覧にもコピーを反映し、URLをコピー側へ移動する。
-    state.index = upsertSummary(state.index, summaryForMemo(visibleMemo));
-    location.hash = `#/memo/${encodeURIComponent(visibleMemo.id)}`;
-    render();
-    notify(t("conflictCopySaved"));
+  // 保存や再読み込みで得た最新版を、表示中のメモと未保存の変更へ取り込む。
+  function absorbRemoteMemo(base, remote) {
+    if (state.memo?.id === remote.id)
+      state.memo = mergeMemos(base, state.memo, remote);
+    const pending = state.pendingSave?.memos[remote.id];
+    if (pending)
+      state.pendingSave.memos[remote.id] = mergeMemos(base, pending, remote);
   }
 
   // Dropboxまたは体験版ストレージからJSONファイルを削除する。
@@ -794,6 +910,7 @@
     }
     await dbx("files/delete_v2", { path });
     delete state.revisions[path];
+    delete state.bases[path];
   }
 
   // メモ一覧を読み、初回利用時は空のindex.jsonを作る。
@@ -808,27 +925,83 @@
       } else throw error;
     }
   }
-  // 最新の保存要求だけを保持し、入力途中の古いスナップショットを捨てる。
-  function rememberPendingSave({ memo = null, index = false } = {}) {
-    const pending = state.pendingSave || {};
+  // 保存・削除・再読み込みを1本の列で順番に実行し、Dropboxへの読み書きが交差しないようにする。
+  function enqueue(task) {
+    const run = state.saveTail.then(task);
+    state.saveTail = run.catch(() => {});
+    return run;
+  }
 
-    // メモ本体と一覧は、それぞれ最後に要求された内容で上書きする。
-    if (memo) pending.memo = clone(memo);
-    if (index) pending.index = clone(state.index);
+  // メモごとに最新の保存要求だけを保持し、入力途中の古いスナップショットを捨てる。
+  function rememberPendingSave({ memo = null, index = false } = {}) {
+    if (!memo && !index) return;
+    const pending = state.pendingSave || { memos: {}, index: false };
+
+    // メモ本体はIDごとに最後に要求された内容で上書きし、一覧は保存時点の内容を使う。
+    if (memo) pending.memos[memo.id] = clone(memo);
+    if (index) pending.index = true;
     state.pendingSave = pending;
   }
 
   // 1件分の保存スナップショットをDropboxへ反映する。
   async function persistPendingSave(pending) {
-    const saved = pending.memo ? await saveMemoSnapshot(pending.memo) : null;
+    const savedMemos = [];
+    let merged = false;
 
-    // 競合コピー化した場合、古い一覧ではなく最新一覧へコピーだけをマージする。
-    if (pending.index && saved?.copied)
-      await mergeMemoIntoLatestIndex(saved.memo);
-    else if (pending.index)
-      await saveIndexSnapshot(pending.index, saved?.memo || null);
+    for (const memo of Object.values(pending.memos)) {
+      const saved = await saveMemoSnapshot(memo);
+      savedMemos.push(saved);
 
-    if (saved) showConflictCopy(saved);
+      // 保存できたメモは、失敗時の再保存対象から外す。古い内容でマージ結果を上書きしないため。
+      delete pending.memos[memo.id];
+      if (state.failedSave) delete state.failedSave.memos[memo.id];
+
+      // 別端末の変更とマージした場合は、画面上のメモにも取り込む。
+      if (saved !== memo) {
+        absorbRemoteMemo(memo, saved);
+        merged = true;
+      }
+
+      // 別端末で削除されて作り直した場合も含め、一覧へ最新のサマリーを載せる。
+      if (!state.deletedMemoIds.has(saved.id))
+        state.index = upsertSummary(
+          state.index,
+          summaryForMemo(state.memo?.id === saved.id ? state.memo : saved),
+        );
+    }
+
+    if (pending.index || savedMemos.length) {
+      if (await saveIndexSnapshot(savedMemos)) merged = true;
+      if (state.failedSave) state.failedSave.index = false;
+    }
+    if (merged) refreshView();
+  }
+
+  // 保存に失敗した内容を覚えておき、再接続や再読み込みのときに保存し直す。
+  function keepFailedSave(pending) {
+    const failed = state.failedSave || { memos: {}, index: false };
+    Object.assign(failed.memos, pending.memos);
+    failed.index = failed.index || pending.index;
+    state.failedSave = failed;
+  }
+
+  // 保存に失敗したままの内容を、保存キューへ戻す。
+  function retryFailedSave() {
+    const failed = state.failedSave;
+    if (!failed || !isConnected()) return;
+    state.failedSave = null;
+    if (!failed.index && !Object.keys(failed.memos).length) return;
+
+    // 表示中のメモはその後の編集も含めて保存し、新しい保存要求があればそちらを優先する。
+    const pending = state.pendingSave || { memos: {}, index: false };
+    Object.entries(failed.memos).forEach(([memoId, memo]) => {
+      if (pending.memos[memoId] || state.deletedMemoIds.has(memoId)) return;
+      pending.memos[memoId] =
+        state.memo?.id === memoId ? clone(state.memo) : memo;
+    });
+    pending.index = pending.index || failed.index;
+    state.pendingSave = pending;
+    queueSave();
   }
 
   // 保存中に増えた変更を、常に最新1件へ畳み込みながら順番に保存する。
@@ -841,8 +1014,9 @@
         try {
           await persistPendingSave(pending);
         } catch (error) {
-          // UIはすでに更新済みなので、保存失敗だけを通知する。
+          // UIはすでに更新済みなので、保存失敗だけを通知して後で保存し直す。
           console.error(error);
+          keepFailedSave(pending);
           notify(t(isConflictError(error) ? "conflictError" : "syncError"));
         }
       }
@@ -857,40 +1031,134 @@
     rememberPendingSave({ memo, index });
 
     // 既存の保存・削除処理の後ろに、まとめた保存処理を1本だけつなぐ。
-    if (!state.saveRunning) {
+    if (!state.saveRunning && state.pendingSave) {
       state.saveRunning = true;
-      state.saveTail = state.saveTail.catch(() => {}).then(drainSaveQueue);
+      enqueue(drainSaveQueue);
     }
     return state.saveTail;
   }
   // メモJSONの削除と一覧更新を、他の保存処理と直列に実行する。
   function queueMemoDeletion(memoId) {
-    // 削除後の一覧を固定して、後から追加された内容で復活しないようにする。
-    const indexSnapshot = clone(state.index);
-
-    // 削除対象メモの未保存スナップショットは、削除後に復活しないよう捨てる。
-    if (state.pendingSave?.memo?.id === memoId) state.pendingSave = null;
+    // 削除したメモが、未保存の変更や一覧のマージで復活しないようにする。
+    state.deletedMemoIds.add(memoId);
+    delete state.pendingSave?.memos[memoId];
+    delete state.failedSave?.memos[memoId];
 
     // 先行している保存のあとに、メモ本体の削除と一覧更新を続けて行う。
-    state.saveTail = state.saveTail
-      .catch(() => {})
-      .then(async () => {
+    return enqueue(async () => {
+      try {
         await deleteFile(memoPath(memoId));
-        await writeFile("/index.json", indexSnapshot);
-      })
-      .catch((error) => {
-        // 削除に失敗しても一覧UIは戻さず、同期失敗だけを通知する。
-        console.error(error);
-        notify(t(isConflictError(error) ? "conflictError" : "syncError"));
+      } catch (error) {
+        if (!isNotFoundError(error)) throw error;
+      }
+      state.index.memos = state.index.memos.filter(
+        (memo) => memo.id !== memoId,
+      );
+      if (await saveIndexSnapshot()) refreshView();
+    }).catch((error) => {
+      // 削除に失敗しても一覧UIは戻さず、同期失敗だけを通知する。
+      console.error(error);
+      notify(t(isConflictError(error) ? "conflictError" : "syncError"));
+    });
+  }
+
+  // 開いているメモに、まだDropboxへ保存していない変更があるかを判定する。
+  const hasUnsavedChanges = (memoId) =>
+    !!(
+      state.pendingSave?.memos[memoId] ||
+      state.failedSave?.memos[memoId] ||
+      (state.templateTimer && state.memo?.id === memoId)
+    );
+
+  // 別端末で削除されたメモを一覧から外し、一覧画面へ戻る。
+  function forgetDeletedMemo(memoId) {
+    state.index.memos = state.index.memos.filter((memo) => memo.id !== memoId);
+    delete state.revisions[memoPath(memoId)];
+    delete state.bases[memoPath(memoId)];
+    if (state.memo?.id === memoId) {
+      state.memo = null;
+      state.editingEntryId = null;
+      clearTemplateSaveTimer();
+    }
+    closeModal();
+    notify(t("memoDeleted"));
+    location.replace("#/");
+  }
+
+  // 一覧と表示中のメモについてrevだけを確認し、変わっていれば読み込んで手元とマージする。
+  async function pullLatest() {
+    const route = routeFromHash(),
+      memoId =
+        route.name !== "list" && state.memo?.id === route.id ? route.id : null,
+      [indexRev, memoRev] = await Promise.all([
+        remoteRevision("/index.json"),
+        memoId ? remoteRevision(memoPath(memoId)) : null,
+      ]);
+    let changed = false;
+
+    if (indexRev && indexRev !== state.revisions["/index.json"]) {
+      const base = state.bases["/index.json"],
+        remote = await readFile("/index.json");
+      state.index = mergeIndex(base, state.index, remote);
+      changed = true;
+    }
+
+    // 確認中に別のメモへ移動していない場合だけ、表示中のメモへ反映する。
+    if (memoId && state.memo?.id === memoId) {
+      const path = memoPath(memoId);
+      if (!memoRev && !hasUnsavedChanges(memoId)) {
+        forgetDeletedMemo(memoId);
+        return "deleted";
+      }
+      if (memoRev && memoRev !== state.revisions[path]) {
+        const base = state.bases[path],
+          remote = await readFile(path);
+        absorbRemoteMemo(base, remote);
+        changed = true;
+      }
+    }
+
+    if (changed) refreshView();
+    return changed;
+  }
+
+  // 保存待ちを片付けたあとで最新を確認する。確認中に重ねて呼ばれたら同じ結果を返す。
+  function refresh() {
+    if (!state.ready || !isConnected()) return Promise.resolve(false);
+    if (!state.refreshing)
+      state.refreshing = enqueue(pullLatest).finally(() => {
+        state.refreshing = null;
       });
-    return state.saveTail;
+    return state.refreshing;
+  }
+
+  // 画面に戻ったときや一定間隔で、別端末の変更を静かに取り込む。
+  function autoRefresh() {
+    if (document.visibilityState !== "visible" || !navigator.onLine) return;
+    refresh().catch((error) => console.warn(error));
+  }
+
+  // ヘッダーの再読み込みボタン。保存に失敗した内容も保存し直し、結果を知らせる。
+  async function manualRefresh() {
+    retryFailedSave();
+    setSyncing(1);
+    try {
+      // 表示中のメモが削除されていた場合は、その通知を残す。
+      const changed = await refresh();
+      if (changed !== "deleted") notify(t(changed ? "updated" : "upToDate"));
+    } catch (error) {
+      console.error(error);
+      notify(t("loadError"));
+    } finally {
+      setSyncing(-1);
+    }
   }
 
   // Dropbox未設定時に、データをこのブラウザだけへ保存する体験版を起動する。
   function startLocal() {
     state.local = true;
     state.revisions = {};
-    state.conflictCopies = {};
+    state.bases = {};
     localStorage.removeItem(STORAGE.auth);
     boot().catch(showError);
   }
@@ -945,9 +1213,19 @@
     saveMemo();
   }
 
-  // 指定されたメモJSONを読み、編集中のメモとしてstateへセットする。
+  // 指定されたメモJSONを読み、編集中のメモとしてstateへセットする。存在しなければfalseを返す。
+  // 保存待ちのあとに読み、保存に失敗したままの変更があれば読み込んだ内容とマージする。
   async function loadMemo(memoId) {
-    state.memo = await readFile(memoPath(memoId));
+    const path = memoPath(memoId),
+      { base, remote } = await enqueue(async () => ({
+        base: state.bases[path],
+        remote: await readFileIfExists(path),
+      })),
+      failed = state.failedSave?.memos[memoId];
+    if (!remote && !failed) return false;
+    if (!failed) state.memo = remote;
+    else state.memo = remote ? mergeMemos(base, failed, remote) : clone(failed);
+    return true;
   }
   // URLハッシュに応じて、一覧・メモ・テンプレート管理を描画する。
   function render() {
@@ -957,8 +1235,11 @@
 
     // 目的のメモが未読なら、読み込み中表示を出してから再描画する。
     if (!state.memo || state.memo.id !== route.id) {
+      state.view = "loading";
       app.innerHTML = `<section class="shell">${header()}<div class="empty"><div class="spinner"></div></div></section>`;
-      loadMemo(route.id).then(render).catch(showError);
+      loadMemo(route.id)
+        .then((found) => (found ? render() : forgetDeletedMemo(route.id)))
+        .catch(showError);
       return;
     }
 
@@ -967,32 +1248,75 @@
     renderMemo();
   }
 
+  // 別端末の変更を取り込んだあと、入力中の内容を壊さない範囲で画面を更新する。
+  function refreshView() {
+    const route = routeFromHash();
+    if (route.name === "list") {
+      if (state.view === "list") renderList();
+      return;
+    }
+    if (!state.memo || state.memo.id !== route.id) return;
+    if (state.view === "memo") return updateMemoView();
+
+    // テンプレート編集中は入力を消さないよう、編集が落ち着くまで描き直さない。
+    const editing = document.activeElement?.closest?.(
+      "[data-template-text],[data-template-name]",
+    );
+    if (state.view === "templates" && !editing && !state.templateTimer)
+      renderTemplates();
+  }
+
   // ログイン後のメモ一覧画面を描画する。
   function renderList() {
     const memos = state.index.memos;
+    state.view = "list";
     app.innerHTML = `<section class="shell">${header({ topControls: true })}<div class="hero"><h1>${t("yourNotes")}</h1></div>${memos.length ? `<div class="memo-list">${memos.map((memo) => `<button class="memo-card" data-open-memo="${escapeAttr(memo.id)}"><span class="memo-avatar">${icon(memo.icon)}</span><span><strong>${escapeHtml(memo.title || t("untitled"))}</strong><small>${formatDate(memo.updatedAt)}</small></span><span class="chevron">›</span></button>`).join("")}</div>` : `<div class="empty"><h2>${t("noMemos")}</h2><p>${t("noMemosText")}</p></div>`}<div class="bottom-action"><button class="primary" data-action="new-memo">${icon("plus", "button-icon")} ${t("newMemo")}</button></div></section>`;
     renderIcons(app);
   }
+  // メモの投稿一覧の中身を組み立てる。
+  const chatHtml = (memo) =>
+    memo.entries.length
+      ? memo.entries
+          .map(
+            (entry) =>
+              `<div class="entry-row"><span class="entry-memo-icon">${icon(memo.icon)}</span><div><button class="bubble" data-entry="${escapeAttr(entry.id)}">${escapeHtml(entry.text || "")}</button><time class="entry-time">${formatDate(entry.createdAt)}</time></div></div>`,
+          )
+          .join("")
+      : `<div class="new-note">${escapeHtml(t("newPost")).replace(/\n/g, "<br>")}</div>`;
+
+  // よく使うテンプレート名を入力欄の近くへ最大4件だけ並べる。
+  // 投稿ボタンと同じく、押しても入力欄のフォーカスを外さない。
+  const templateStripHtml = (memo) =>
+    `<button class="template-chip" data-action="pick-template">${icon("message-square-text", "button-icon")} ${t("templates")}</button>${memo.templates
+      .slice(0, 4)
+      .map(
+        (template) =>
+          `<button class="template-chip" data-template="${escapeAttr(template.id)}" data-keep-focus>${escapeHtml(templateLabel(template))}</button>`,
+      )
+      .join("")}`;
+
   // メモ本体は投稿を先にUIへ反映し、Dropbox保存はバックグラウンドで行う。
-  function renderMemo({ focusInput = false } = {}) {
-    // よく使うテンプレート名を入力欄の近くへ最大4件だけ並べる。
+  function renderMemo() {
+    // 同じメモ画面を描き直すときは、入力途中の文章を引き継ぐ。
     const memo = state.memo,
-      templateButtons = memo.templates
-        .slice(0, 4)
-        .map(
-          (template) =>
-            `<button class="template-chip" data-template="${escapeAttr(template.id)}">${escapeHtml(templateLabel(template))}</button>`,
-        )
-        .join("");
+      draft =
+        state.view === "memo"
+          ? document.querySelector("#entry-input")?.value || ""
+          : "";
+    state.view = "memo";
 
     // メモの投稿一覧、テンプレート操作、入力欄をまとめて描画する。
-    app.innerHTML = `<section class="shell memo-screen">${header({ back: true, title: memo.title || t("newMemoTitle"), right: `<button class="icon-button" data-action="note-menu" aria-label="Note menu">${icon("menu")}</button>` })}<div class="chat">${memo.entries.length ? memo.entries.map((entry) => `<div class="entry-row"><span class="entry-memo-icon">${icon(memo.icon)}</span><div><button class="bubble" data-entry="${escapeAttr(entry.id)}">${escapeHtml(entry.text || "")}</button><time class="entry-time">${formatDate(entry.createdAt)}</time></div></div>`).join("") : `<div class="new-note">${escapeHtml(t("newPost")).replace(/\n/g, "<br>")}</div>`}</div><div class="composer-wrap"><div class="template-strip"><button class="template-chip" data-action="pick-template">${icon("message-square-text", "button-icon")} ${t("templates")}</button>${templateButtons}</div><div class="composer"><textarea id="entry-input" rows="1" placeholder="${t("placeholder")}" aria-label="${t("send")}"></textarea><button class="send" data-action="submit-entry" aria-label="${t("send")}">${icon("send")}</button></div></div></section>`;
+    app.innerHTML = `<section class="shell memo-screen">${header({ back: true, title: memo.title || t("newMemoTitle"), right: `<button class="icon-button" data-action="note-menu" aria-label="Note menu">${icon("menu")}</button>` })}<div class="chat">${chatHtml(memo)}</div><div class="composer-wrap"><div class="template-strip">${templateStripHtml(memo)}</div><div class="composer"><textarea id="entry-input" rows="1" placeholder="${t("placeholder")}" aria-label="${t("send")}"></textarea><button class="send" data-action="submit-entry" data-keep-focus aria-label="${t("send")}">${icon("send")}</button></div></div></section>`;
 
     // 描画したLucideアイコンをSVGへ変換する。
     renderIcons(app);
 
     // テキストエリアの高さを内容に合わせ、⌘/Ctrl+Enterで投稿できるようにする。
     const input = document.querySelector("#entry-input");
+    if (draft) {
+      input.value = draft;
+      fitTextarea(input, 150);
+    }
     input.addEventListener("input", () => {
       fitTextarea(input, 150);
     });
@@ -1003,14 +1327,37 @@
       }
     });
 
-    // 初期表示や新規投稿後は、常に新しい投稿が見える末尾までスクロールする。
+    // 初期表示では、常に新しい投稿が見える末尾までスクロールする。
     scrollMemoToBottom();
-    if (focusInput) focusEntryInput(input);
   }
+
+  // 投稿一覧・タイトル・テンプレート候補だけを差し替える。
+  // 入力欄は作り直さないので、iPhoneでもキーボードが閉じたり入力途中の文章が消えたりしない。
+  function updateMemoView({ scrollToEnd = false } = {}) {
+    const chat = app.querySelector(".chat"),
+      strip = app.querySelector(".template-strip"),
+      title = app.querySelector(".memo-title");
+    if (state.view !== "memo" || !chat || !strip) return renderMemo();
+
+    // 末尾付近を見ていたときだけ末尾へ追従し、過去の投稿を読んでいる位置は保つ。
+    const scrollTop = chat.scrollTop,
+      atEnd =
+        scrollToEnd ||
+        chat.scrollHeight - chat.scrollTop - chat.clientHeight < 40;
+    if (title) title.textContent = state.memo.title || t("newMemoTitle");
+    chat.innerHTML = chatHtml(state.memo);
+    strip.innerHTML = templateStripHtml(state.memo);
+    renderIcons(chat);
+    renderIcons(strip);
+    if (atEnd) scrollMemoToBottom();
+    else chat.scrollTop = scrollTop;
+  }
+
   // テンプレートは名前と本文を同じ画面で直接編集し、自動保存する。
   function renderTemplates() {
     // テンプレートがない場合も、追加ボタンは常に表示する。
     const templates = state.memo.templates;
+    state.view = "templates";
     app.innerHTML = `<section class="shell template-admin">${header({ back: true, title: "" })}<h1>${t("templates")}</h1><p>${t("templatesText")}</p><div id="template-list">${templates.length ? templates.map((template, index) => `<article class="template-item"><input class="template-name" data-template-name="${escapeAttr(template.id)}" value="${escapeHtml(template.name || "")}" placeholder="${t("templateName")}" aria-label="${t("templateName")}"><textarea data-template-text="${escapeAttr(template.id)}" aria-label="${t("templates")}"></textarea><div class="template-item-actions"><button class="small-button" data-move="up" data-template-id="${escapeAttr(template.id)}" ${index === 0 ? "disabled" : ""}>${icon("arrow-up-from-line")}</button><button class="small-button" data-move="down" data-template-id="${escapeAttr(template.id)}" ${index === templates.length - 1 ? "disabled" : ""}>${icon("arrow-down-from-line")}</button><button class="small-button danger" data-action="delete-template" data-template-id="${escapeAttr(template.id)}">${icon("square-x", "button-icon")} ${t("delete")}</button></div></article>`).join("") : `<div class="empty"><h2>${t("noTemplates")}</h2></div>`}</div><button class="outline template-add-button" data-action="new-template">${icon("plus", "button-icon")} ${t("addTemplate")}</button></section>`;
 
     // textareaのHTML初期値では先頭改行が落ちるため、valueとして正確に復元する。
@@ -1034,6 +1381,17 @@
     modal.className = className;
     modal.id = "modal";
     modal.innerHTML = content;
+
+    // メニュー外の薄暗い部分をタップしたら閉じる。シート内から指をずらして離した場合は閉じない。
+    // iOSは要素に直接clickリスナーがないと、divのタップでclickを発生させないため個別に登録する。
+    let pressedBackdrop = false;
+    modal.addEventListener("pointerdown", (event) => {
+      pressedBackdrop = event.target === modal;
+    });
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal && pressedBackdrop) closeModal();
+    });
+
     document.body.append(modal);
     renderIcons(modal);
   }
@@ -1144,14 +1502,18 @@
       if (!state.memo.title) state.memo.title = text;
     }
 
-    // UIは直ちに再描画し、保存はキュー経由で裏で進める。
+    // 入力欄は作り直さずに空にして、投稿一覧だけを更新する。保存はキュー経由で裏で進める。
+    input.value = "";
+    fitTextarea(input, 150);
     saveMemo();
-    renderMemo({ focusInput: true });
+    updateMemoView({ scrollToEnd: true });
+    focusEntryInput(input);
   }
 
   // 予期しないエラーを画面と開発者コンソールへ表示する。
   function showError(error) {
     console.error(error);
+    state.view = "error";
     app.innerHTML = `<section class="shell">${header()}<div class="empty"><h2>${t("loadError")}</h2><p>${escapeHtml(error.message || "")}</p><button class="primary" data-action="retry">${t("retry")}</button></div></section>`;
   }
   // 起動時はOAuthの戻りを処理してから、認証済みならDropboxの一覧を読む。
@@ -1168,11 +1530,13 @@
 
     // 認証済みなら一覧を読んで、URLに対応する画面を表示する。
     await loadIndex();
+    state.ready = true;
     render();
   }
 
   // 未ログイン時のウェルカム画面を描画する。
   function renderWelcome() {
+    state.view = "welcome";
     app.innerHTML = `<section class="shell">${header({ topControls: true })}<div class="welcome empty"><div class="welcome-app-icon" aria-hidden="true"></div><h2>${t("welcome")}</h2><p>${t("welcomeText")}</p><button class="primary" data-action="connect">${t("connect")}</button></div></section>`;
     renderIcons(app);
   }
@@ -1182,8 +1546,10 @@
     localStorage.removeItem(STORAGE.auth);
     state.memo = null;
     state.index = { version: 1, memos: [] };
+    state.ready = false;
     state.revisions = {};
-    state.conflictCopies = {};
+    state.bases = {};
+    state.failedSave = null;
     clearTemplateSaveTimer();
     history.replaceState({}, "", location.pathname);
     renderWelcome();
@@ -1252,6 +1618,7 @@
       if (action === "connect") return connectDropbox();
       if (action === "logout") return logout();
       if (action === "retry") return boot().catch(showError);
+      if (action === "refresh") return manualRefresh();
       if (action === "close-modal") return closeModal();
       if (action === "new-memo") return createMemo();
 
@@ -1275,7 +1642,7 @@
         state.memo.icon = safeIconName(target.dataset.memoIcon);
         saveMemo();
         closeModal();
-        renderMemo();
+        updateMemoView();
         return;
       }
       if (action === "templates") {
@@ -1298,7 +1665,7 @@
           saveMemo();
         }
         closeModal();
-        renderMemo();
+        updateMemoView();
         return;
       }
       if (action === "submit-entry") return submitEntry();
@@ -1319,15 +1686,20 @@
       }
 
       // 投稿をタップした場合は、投稿用の操作メニューを開く。
-      if (target.dataset.entry)
-        return menuForEntry(
-          state.memo.entries.find((entry) => entry.id === target.dataset.entry),
+      if (target.dataset.entry) {
+        const entry = state.memo.entries.find(
+          (item) => item.id === target.dataset.entry,
         );
+        return entry && menuForEntry(entry);
+      }
       if (target.dataset.entryAction) {
         const entry = state.memo.entries.find(
             (item) => item.id === target.dataset.entryId,
           ),
           choice = target.dataset.entryAction;
+
+        // メニュー表示中に別端末で削除された投稿は、操作せずにメニューを閉じる。
+        if (!entry) return closeModal();
 
         // クリップボードへのコピーは非同期APIで行う。
         if (choice === "copy") {
@@ -1377,7 +1749,7 @@
         );
         saveMemo();
         closeModal();
-        renderMemo();
+        updateMemoView();
         notify(t("deleted"));
         return;
       }
@@ -1402,6 +1774,7 @@
             (template) => template.id === target.dataset.templateId,
           ),
           to = target.dataset.move === "up" ? from - 1 : from + 1;
+        if (from < 0 || !state.memo.templates[to]) return renderTemplates();
         [state.memo.templates[from], state.memo.templates[to]] = [
           state.memo.templates[to],
           state.memo.templates[from],
@@ -1418,8 +1791,105 @@
   // 初期言語・URL遷移・PWA登録を設定してから、アプリを起動する。
   document.documentElement.lang = language();
 
-  // ブラウザの戻る・進むによるURL変更を、画面表示へ反映する。
-  window.addEventListener("hashchange", render);
+  // ブラウザの戻る・進むによるURL変更を、画面表示へ反映し、移動先の最新も確認する。
+  window.addEventListener("hashchange", () => {
+    render();
+    autoRefresh();
+  });
+
+  // 別端末からの更新を取り込むため、画面に戻ったときと表示中は一定間隔で最新を確認する。
+  // 保存に失敗した内容も、画面に戻ったときや再接続したときに保存し直す。
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    retryFailedSave();
+    autoRefresh();
+  });
+  window.addEventListener("focus", autoRefresh);
+  window.addEventListener("online", () => {
+    retryFailedSave();
+    autoRefresh();
+  });
+  setInterval(autoRefresh, REFRESH_INTERVAL);
+
+  // Escキーで開いているメニューやダイアログを閉じる。日本語入力の変換中は閉じない。
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || event.isComposing) return;
+    if (!document.querySelector("#modal")) return;
+    event.preventDefault();
+    closeModal();
+  });
+
+  // 入力中に投稿ボタンやテンプレートを押しても、入力欄のフォーカスを外さない。
+  // iPhoneはキーボードが一度閉じて開き直すと入力欄がキーボードの裏に隠れるため、
+  // 入力中のタップは既定動作（フォーカス移動）を止めて、自前でクリックとして扱う。
+  const entryInputFocused = () => document.activeElement?.id === "entry-input";
+  let keepFocusTap = null;
+  document.addEventListener("mousedown", (event) => {
+    if (entryInputFocused() && event.target.closest("[data-keep-focus]"))
+      event.preventDefault();
+  });
+  document.addEventListener(
+    "touchstart",
+    (event) => {
+      const button = event.target.closest("[data-keep-focus]"),
+        touch = event.touches[0];
+      keepFocusTap =
+        button && event.touches.length === 1 && entryInputFocused()
+          ? { button, x: touch.clientX, y: touch.clientY }
+          : null;
+    },
+    { passive: true },
+  );
+  document.addEventListener(
+    "touchmove",
+    (event) => {
+      // テンプレート列の横スクロールなど、指が動いた場合はタップとみなさない。
+      const touch = event.touches[0];
+      if (
+        keepFocusTap &&
+        touch &&
+        Math.hypot(
+          touch.clientX - keepFocusTap.x,
+          touch.clientY - keepFocusTap.y,
+        ) > 10
+      )
+        keepFocusTap = null;
+    },
+    { passive: true },
+  );
+  document.addEventListener(
+    "touchend",
+    (event) => {
+      const tap = keepFocusTap;
+      keepFocusTap = null;
+      if (!tap || !tap.button.isConnected) return;
+      event.preventDefault();
+      tap.button.click();
+    },
+    { passive: false },
+  );
+  document.addEventListener("touchcancel", () => {
+    keepFocusTap = null;
+  });
+
+  // 背景のボケ玉は、起動ごとに数・大きさ・位置・濃さをランダムに変える。
+  function paintBokeh() {
+    const random = (min, max) => min + Math.random() * (max - min),
+      tones = ["30 94 73", "23 71 55", "38 112 86", "26 84 66", "47 124 96"],
+      balls = Array.from({ length: Math.floor(random(3, 8)) }, () => {
+        const tone = tones[Math.floor(Math.random() * tones.length)],
+          radius = Math.round(random(120, 560)),
+          x = random(-10, 110).toFixed(1),
+          y = random(-10, 110).toFixed(1),
+          alpha = random(0.45, 1).toFixed(2);
+        return `radial-gradient(circle ${radius}px at ${x}% ${y}%, rgb(${tone} / ${alpha}) 0%, transparent 68%)`;
+      });
+    document.body.style.backgroundImage = [
+      ...balls,
+      "linear-gradient(145deg, var(--bg), var(--bg-deep))",
+    ].join(",");
+  }
+  paintBokeh();
 
   // オフラインキャッシュは持たないが、PWAとしてインストールできるようService Workerを登録する。
   if ("serviceWorker" in navigator)

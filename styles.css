@@ -106,6 +106,12 @@ button {
     transform: rotate(360deg);
   }
 }
+.sync-button.is-syncing {
+  color: var(--accent);
+}
+.sync-button.is-syncing .memo-icon {
+  animation: spin 0.9s linear infinite;
+}
 .icon-button {
   min-width: 39px;
   height: 39px;
