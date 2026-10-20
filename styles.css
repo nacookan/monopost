@@ -378,6 +378,7 @@ button {
   white-space: nowrap;
 }
 .composer {
+  position: relative;
   display: flex;
   align-items: flex-end;
   gap: 9px;
@@ -398,6 +399,22 @@ button {
   color: var(--ink);
   font-size: 16px;
   line-height: 1.4;
+}
+/* 入力状態を作り直すための中継用入力欄。入力欄に重ねて置き、見えなくする。
+   iOSは画面外や16px未満の入力欄だとスクロールや拡大をするため、位置と文字サイズを合わせる。 */
+.composer .entry-relay {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  width: 40px;
+  min-height: 0;
+  height: 24px;
+  flex: none;
+  padding: 0;
+  color: transparent;
+  caret-color: transparent;
+  opacity: 0;
+  pointer-events: none;
 }
 .composer textarea::placeholder {
   color: #84a799;

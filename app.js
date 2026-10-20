@@ -306,6 +306,41 @@
     textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
   }
 
+  // 入力中の入力欄をスクリプトで書き換えるときは、重ねて置いた見えない中継用の入力欄へ
+  // いったんフォーカスを移して変換を終わらせ、書き換え後に入力欄へ戻す。
+  // iPhoneの日本語入力は、変換中のまま書き換えるとその後に打った文字が入らなくなる。
+  // 同じ要素のblur/focusでは直らないが、入力欄どうしの移動ならキーボードを閉じずに入力状態を作り直せる。
+  function editEntryInput(input, edit) {
+    const relay = document.querySelector("#entry-relay");
+    if (document.activeElement !== input || !relay) return edit();
+
+    // フォーカス移動で変換中の文字が消えた場合に備え、移動前の内容へ戻してから書き換える。
+    const { value, selectionStart, selectionEnd } = input;
+    relay.focus();
+    if (input.value !== value) {
+      input.value = value;
+      input.setSelectionRange(selectionStart, selectionEnd);
+    }
+    try {
+      edit();
+    } finally {
+      input.focus();
+      relay.value = "";
+    }
+
+    // 変換中だった場合、直後の切り替えだけでは入力状態が戻らないことがある。
+    // 少し待ってもまだ何も入力されていなければ、もう一度切り替えて作り直す。
+    const edited = input.value;
+    [80, 300].forEach((delay) =>
+      setTimeout(() => {
+        if (document.activeElement !== input || input.value !== edited) return;
+        relay.focus();
+        input.focus();
+        relay.value = "";
+      }, delay),
+    );
+  }
+
   // テンプレート本文を、改行を補ったり削ったりせずカーソル位置へ挿入する。
   function insertAtCursor(input, text) {
     const start = input.selectionStart ?? input.value.length,
@@ -1306,7 +1341,7 @@
     state.view = "memo";
 
     // メモの投稿一覧、テンプレート操作、入力欄をまとめて描画する。
-    app.innerHTML = `<section class="shell memo-screen">${header({ back: true, title: memo.title || t("newMemoTitle"), right: `<button class="icon-button" data-action="note-menu" aria-label="Note menu">${icon("menu")}</button>` })}<div class="chat">${chatHtml(memo)}</div><div class="composer-wrap"><div class="template-strip">${templateStripHtml(memo)}</div><div class="composer"><textarea id="entry-input" rows="1" placeholder="${t("placeholder")}" aria-label="${t("send")}"></textarea><button class="send" data-action="submit-entry" data-keep-focus aria-label="${t("send")}">${icon("send")}</button></div></div></section>`;
+    app.innerHTML = `<section class="shell memo-screen">${header({ back: true, title: memo.title || t("newMemoTitle"), right: `<button class="icon-button" data-action="note-menu" aria-label="Note menu">${icon("menu")}</button>` })}<div class="chat">${chatHtml(memo)}</div><div class="composer-wrap"><div class="template-strip">${templateStripHtml(memo)}</div><div class="composer"><textarea id="entry-input" rows="1" placeholder="${t("placeholder")}" aria-label="${t("send")}"></textarea><textarea id="entry-relay" class="entry-relay" rows="1" tabindex="-1" aria-hidden="true"></textarea><button class="send" data-action="submit-entry" data-keep-focus aria-label="${t("send")}">${icon("send")}</button></div></div></section>`;
 
     // 描画したLucideアイコンをSVGへ変換する。
     renderIcons(app);
@@ -1484,29 +1519,33 @@
   }
   // 入力欄の内容を投稿する。編集中なら既存投稿を更新し、それ以外は末尾に追加する。
   function submitEntry() {
-    // 空白だけの投稿は作らない。
-    const input = document.querySelector("#entry-input"),
-      text = input.value;
-    if (!text.trim()) return;
+    const input = document.querySelector("#entry-input");
 
-    // 編集対象の有無で、更新と新規追加を切り替える。
-    const existing =
-      state.editingEntryId &&
-      state.memo.entries.find((entry) => entry.id === state.editingEntryId);
-    if (existing) {
-      existing.text = text;
-      existing.updatedAt = now();
-      state.editingEntryId = null;
-    } else {
-      state.memo.entries.push({ id: id(), text, createdAt: now() });
-      if (!state.memo.title) state.memo.title = text;
-    }
+    // 変換中の文字も確定させてから本文を読み、入力欄を空にする。
+    editEntryInput(input, () => {
+      // 空白だけの投稿は作らない。
+      const text = input.value;
+      if (!text.trim()) return;
 
-    // 入力欄は作り直さずに空にして、投稿一覧だけを更新する。保存はキュー経由で裏で進める。
-    input.value = "";
-    fitTextarea(input, 150);
-    saveMemo();
-    updateMemoView({ scrollToEnd: true });
+      // 編集対象の有無で、更新と新規追加を切り替える。
+      const existing =
+        state.editingEntryId &&
+        state.memo.entries.find((entry) => entry.id === state.editingEntryId);
+      if (existing) {
+        existing.text = text;
+        existing.updatedAt = now();
+        state.editingEntryId = null;
+      } else {
+        state.memo.entries.push({ id: id(), text, createdAt: now() });
+        if (!state.memo.title) state.memo.title = text;
+      }
+
+      // 入力欄は作り直さずに空にして、投稿一覧だけを更新する。保存はキュー経由で裏で進める。
+      input.value = "";
+      fitTextarea(input, 150);
+      saveMemo();
+      updateMemoView({ scrollToEnd: true });
+    });
     focusEntryInput(input);
   }
 
@@ -1678,7 +1717,7 @@
           ),
           input = document.querySelector("#entry-input");
         if (template && input) {
-          insertAtCursor(input, template.text);
+          editEntryInput(input, () => insertAtCursor(input, template.text));
           focusEntryInput(input);
         }
         closeModal();
